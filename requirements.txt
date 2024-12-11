@@ -1,7 +1,8 @@
 streamlit
-faiss-cpu
+PyPDF2
+python-docx
+nltk
 sentence-transformers
-transformers
+scikit-learn
 torch
-Pillow
-sentencepiece
+numpy
