@@ -3,3 +3,5 @@ faiss-cpu
 sentence-transformers
 transformers
 torch
+spacy
+en-core-web-sm
