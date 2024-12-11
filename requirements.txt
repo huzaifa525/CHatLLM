@@ -4,3 +4,4 @@ sentence-transformers
 transformers
 torch
 Pillow
+sentencepiece
