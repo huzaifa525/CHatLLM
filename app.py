@@ -20,7 +20,7 @@ embedding_model = load_embedding_model()
 @st.cache_resource
 def load_qa_model():
     # A more capable QA model
-    qa_model_name = "deepset/bert-large-uncased-whole-word-masking-squad2"
+    qa_model_name = "naver-clova-ix/donut-base-finetuned-docvqa"
     tokenizer = AutoTokenizer.from_pretrained(qa_model_name)
     model = AutoModelForQuestionAnswering.from_pretrained(qa_model_name)
     return tokenizer, model
