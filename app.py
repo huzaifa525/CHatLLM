@@ -1,7 +1,7 @@
 import streamlit as st
 from transformers import VisionEncoderDecoderModel, DonutProcessor
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import io
 
 # ----------------------------
@@ -11,10 +11,10 @@ st.title("DocVQA with Donut Model")
 
 @st.cache_resource
 def load_docvqa_model():
-    # Load Donut model and processor
     model_name = "naver-clova-ix/donut-base-finetuned-docvqa"
-    processor = DonutProcessor.from_pretrained(model_name)
-    model = VisionEncoderDecoderModel.from_pretrained(model_name)
+    hf_token = "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"  # Directly using the provided token
+    processor = DonutProcessor.from_pretrained(model_name, use_auth_token=hf_token)
+    model = VisionEncoderDecoderModel.from_pretrained(model_name, use_auth_token=hf_token)
     return processor, model
 
 processor, model = load_docvqa_model()
@@ -27,10 +27,20 @@ def chunk_text(text, chunk_size=200):
     for i in range(0, len(words), chunk_size):
         yield " ".join(words[i:i+chunk_size])
 
+def text_to_image(text):
+    # Convert text chunk to an image for demonstration purposes.
+    img = Image.new('RGB', (800, 1000), color='white')
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+    margin = 10
+    offset = 10
+    for line in text.split('\n'):
+        draw.text((margin, offset), line, font=font, fill='black')
+        offset += 20
+    return img
+
 def run_docvqa_on_image(question, image: Image.Image):
-    # Prepare question prompt as per Donut docvqa format
     question_prompt = f"<s_docvqa><s_question>{question}</s_question><s_answer>"
-    
     pixel_values = processor(image, return_tensors="pt").pixel_values
     decoder_input_ids = processor.tokenizer(question_prompt, add_special_tokens=False, return_tensors="pt").input_ids
 
@@ -43,35 +53,17 @@ def run_docvqa_on_image(question, image: Image.Image):
     )
     answer = processor.tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
     answer = answer.replace("</s>", "").strip()
-    return answer if answer else "No clear answer found."
-
-def text_to_image(text):
-    # Convert text chunk to an image for demonstration
-    # (This is a hack. The donut model is for images, not raw text.)
-    # For demonstration, we will render text on an image background.
-    # Results may not be meaningful since the model is trained on document images.
-    
-    from PIL import ImageDraw, ImageFont
-    # Create a white image
-    img = Image.new('RGB', (800, 1000), color='white')
-    draw = ImageDraw.Draw(img)
-    # If you have a font file, you can specify it, else will use default.
-    # Attempt to wrap text
-    font = ImageFont.load_default()
-    margin = 10
-    offset = 10
-    for line in text.split('\n'):
-        draw.text((margin, offset), line, font=font, fill='black')
-        offset += 20
-    return img
+    if not answer:
+        answer = "No clear answer found."
+    return answer
 
 # ----------------------------
 # Streamlit App
 # ----------------------------
 
-st.write("Upload image or text documents and then ask a question. For best results, upload scanned document images.")
+st.write("Upload image documents (PNG/JPG) for best results. TXT files are supported but will not produce meaningful results since the model is trained on document images.")
 
-uploaded_files = st.file_uploader("Upload documents (images like .png/.jpg or text files)", 
+uploaded_files = st.file_uploader("Upload documents (images or text)", 
                                   type=["txt","png","jpg","jpeg"],
                                   accept_multiple_files=True)
 
@@ -82,21 +74,20 @@ if uploaded_files:
     for uploaded_file in uploaded_files:
         file_type = uploaded_file.type
         if "text" in file_type:
-            # Text file, chunk it and convert chunks to images
+            # Text file - chunk and convert chunks to images
             content = uploaded_file.read().decode("utf-8", errors='ignore')
             for ch in chunk_text(content, chunk_size):
                 if ch.strip():
                     docs.append(('text', ch))
         elif "image" in file_type:
-            # Direct image
+            # Image file - directly use
             image = Image.open(uploaded_file).convert("RGB")
             docs.append(('image', image))
 
 if docs:
     user_query = st.text_input("Ask a question about the uploaded documents:")
     if user_query:
-        # For simplicity, just use the first doc. 
-        # If multiple docs are present, you could let the user pick which doc to query.
+        # For simplicity, just use the first document
         doc_type, doc_data = docs[0]
         
         if doc_type == 'text':
@@ -104,13 +95,13 @@ if docs:
             doc_image = text_to_image(doc_data)
             final_answer = run_docvqa_on_image(user_query, doc_image)
         else:
-            # It's already an image
+            # Already an image
             final_answer = run_docvqa_on_image(user_query, doc_data)
 
         st.subheader("Answer:")
         st.write(final_answer)
 
-        # Optionally show the doc image
+        # Show the document (or the rendered text image)
         if doc_type == 'text':
             st.subheader("Document Preview (Rendered from text):")
             st.image(text_to_image(doc_data))
@@ -118,4 +109,4 @@ if docs:
             st.subheader("Document Preview:")
             st.image(doc_data)
 else:
-    st.write("No documents processed. Please upload an image or text file.")
+    st.write("No documents processed. Please upload at least one supported file.")
