@@ -132,7 +132,7 @@ def run_docvqa_on_image(
             
         # Prepare inputs
         question_prompt = f"<s_docvqa><s_question>{question}</s_question><s_answer>"
-        pixel_values = processor(image, return_tensors="pt").pixel_values
+        pixel_values = processor(image, return_tensors="pt", legacy=False).pixel_values
         
         if torch.cuda.is_available():
             pixel_values = pixel_values.to("cuda")
