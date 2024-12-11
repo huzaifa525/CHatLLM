@@ -4,211 +4,194 @@ import docx
 from sentence_transformers import SentenceTransformer
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+from rank_bm25 import BM25Okapi
 import torch
-import io
-from typing import List, Tuple
-import os
+from typing import List, Tuple, Dict
+import re
+from transformers import AutoTokenizer
+from huggingface_hub import HfApi
+import time
+from tqdm import tqdm
 
-class DocumentProcessor:
-    def __init__(self):
-        self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-    
-    def extract_text_from_pdf(self, pdf_file) -> str:
-        try:
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text() + "\n"
-            return text
-        except Exception as e:
-            st.error(f"Error processing PDF: {str(e)}")
-            return ""
-    
-    def extract_text_from_docx(self, docx_file) -> str:
-        try:
-            doc = docx.Document(docx_file)
-            text = ""
-            for paragraph in doc.paragraphs:
-                text += paragraph.text + "\n"
-            return text
-        except Exception as e:
-            st.error(f"Error processing DOCX: {str(e)}")
-            return ""
-    
-    def split_into_chunks(self, text: str, chunk_size: int = 200) -> List[str]:
-        """Split text into chunks based on character count"""
-        if not text.strip():
-            return []
-            
-        try:
-            # Split text into paragraphs
-            paragraphs = text.split('\n')
-            chunks = []
-            current_chunk = ""
-            
-            for paragraph in paragraphs:
-                if len(current_chunk) + len(paragraph) <= chunk_size:
-                    current_chunk += paragraph + " "
-                else:
-                    if current_chunk:
-                        chunks.append(current_chunk.strip())
-                    current_chunk = paragraph + " "
-            
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            
-            # Handle case where chunks are too large
-            final_chunks = []
-            for chunk in chunks:
-                if len(chunk) > chunk_size:
-                    # Split into smaller chunks based on periods
-                    sentences = chunk.split('.')
-                    temp_chunk = ""
-                    for sentence in sentences:
-                        if len(temp_chunk) + len(sentence) <= chunk_size:
-                            temp_chunk += sentence + ". "
-                        else:
-                            if temp_chunk:
-                                final_chunks.append(temp_chunk.strip())
-                            temp_chunk = sentence + ". "
-                    if temp_chunk:
-                        final_chunks.append(temp_chunk.strip())
-                else:
-                    final_chunks.append(chunk)
-            
-            return final_chunks
-        except Exception as e:
-            st.error(f"Error splitting text into chunks: {str(e)}")
-            return [text]  # Return original text as single chunk if splitting fails
-    
-    def get_embeddings(self, texts: List[str]) -> np.ndarray:
-        try:
-            return self.model.encode(texts)
-        except Exception as e:
-            st.error(f"Error generating embeddings: {str(e)}")
-            return np.array([])
-    
-    def find_most_similar_chunks(self, 
-                               query: str, 
-                               chunks: List[str], 
-                               chunk_embeddings: np.ndarray,
-                               top_k: int = 3) -> List[Tuple[str, float]]:
-        if not chunks or not query:
-            return []
-            
-        try:
-            query_embedding = self.model.encode([query])
-            similarities = cosine_similarity(query_embedding, chunk_embeddings)[0]
-            
-            most_similar_indices = similarities.argsort()[-top_k:][::-1]
-            results = []
-            
-            for idx in most_similar_indices:
-                results.append((chunks[idx], similarities[idx]))
-            
-            return results
-        except Exception as e:
-            st.error(f"Error finding similar chunks: {str(e)}")
-            return []
-
-@st.cache_resource
-def get_document_processor():
-    return DocumentProcessor()
-
-def process_documents(files, doc_processor):
-    all_text = ""
-    progress_bar = st.progress(0)
-    
-    for i, file in enumerate(files):
-        progress = (i + 1) / len(files)
-        progress_bar.progress(progress)
+class EnhancedRetriever:
+    def __init__(self, hf_token: str):
+        self.hf_token = hf_token
+        # Using a more powerful SBERT model for better semantic understanding
+        self.model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2', 
+                                        use_auth_token=hf_token)
+        self.tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-mpnet-base-v2',
+                                                      use_auth_token=hf_token)
+        self.bm25 = None
+        self.chunks = []
+        self.embeddings = None
         
-        if file.type == "application/pdf":
-            all_text += doc_processor.extract_text_from_pdf(file)
-        elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            all_text += doc_processor.extract_text_from_docx(file)
+    def preprocess_text(self, text: str) -> str:
+        """Clean and normalize text"""
+        text = re.sub(r'\s+', ' ', text)  # Remove multiple spaces
+        text = re.sub(r'[^\w\s.]', '', text)  # Remove special characters except periods
+        return text.strip()
+    
+    def create_sliding_windows(self, text: str, window_size: int = 100, stride: int = 50) -> List[str]:
+        """Create overlapping windows of text for better context preservation"""
+        words = text.split()
+        windows = []
+        
+        for i in range(0, len(words), stride):
+            window = ' '.join(words[i:i + window_size])
+            if window:
+                windows.append(window)
+                
+        return windows
+    
+    def chunk_text(self, text: str) -> List[str]:
+        """Enhanced text chunking with sliding windows and smart splitting"""
+        # First clean the text
+        text = self.preprocess_text(text)
+        
+        # Split into paragraphs
+        paragraphs = text.split('\n')
+        
+        # Process each paragraph
+        chunks = []
+        for para in paragraphs:
+            if len(para.split()) > 100:  # Long paragraph
+                chunks.extend(self.create_sliding_windows(para))
+            else:
+                chunks.append(para)
+                
+        # Remove duplicates while preserving order
+        seen = set()
+        filtered_chunks = []
+        for chunk in chunks:
+            if chunk not in seen and len(chunk.split()) > 5:  # Minimum chunk size
+                seen.add(chunk)
+                filtered_chunks.append(chunk)
+                
+        return filtered_chunks
+    
+    def initialize_retriever(self, text: str):
+        """Initialize both dense and sparse retrievers"""
+        self.chunks = self.chunk_text(text)
+        
+        # Initialize BM25
+        tokenized_chunks = [chunk.split() for chunk in self.chunks]
+        self.bm25 = BM25Okapi(tokenized_chunks)
+        
+        # Generate dense embeddings
+        self.embeddings = self.model.encode(self.chunks, 
+                                          show_progress_bar=True, 
+                                          batch_size=8,
+                                          normalize_embeddings=True)  # Normalized for better similarity
+    
+    def hybrid_search(self, query: str, top_k: int = 3) -> List[Tuple[str, float]]:
+        """Combine BM25 and dense retrieval for more accurate results"""
+        if not self.chunks:
+            return []
             
-    progress_bar.empty()
-    return all_text
+        # Get BM25 scores
+        bm25_scores = self.bm25.get_scores(query.split())
+        bm25_scores = (bm25_scores - np.min(bm25_scores)) / (np.max(bm25_scores) - np.min(bm25_scores))
+        
+        # Get dense embedding scores
+        query_embedding = self.model.encode([query], normalize_embeddings=True)[0]
+        dense_scores = cosine_similarity([query_embedding], self.embeddings)[0]
+        
+        # Combine scores (weighted average)
+        combined_scores = 0.3 * bm25_scores + 0.7 * dense_scores
+        
+        # Get top results
+        top_indices = combined_scores.argsort()[-top_k:][::-1]
+        results = [(self.chunks[i], combined_scores[i]) for i in top_indices]
+        
+        return results
+
+def extract_text_from_docs(files) -> str:
+    """Extract text from multiple document formats"""
+    text = ""
+    for file in files:
+        try:
+            if file.name.endswith('.pdf'):
+                pdf_reader = PyPDF2.PdfReader(file)
+                for page in pdf_reader.pages:
+                    text += page.extract_text() + "\n"
+            elif file.name.endswith(('.docx', '.doc')):
+                doc = docx.Document(file)
+                for para in doc.paragraphs:
+                    text += para.text + "\n"
+        except Exception as e:
+            st.error(f"Error processing {file.name}: {str(e)}")
+    return text
+
+def validate_token(token: str) -> bool:
+    """Validate HuggingFace token"""
+    try:
+        api = HfApi(token=token)
+        api.whoami()
+        return True
+    except Exception:
+        return False
 
 def main():
-    st.set_page_config(page_title="Document QA without LLM", layout="wide")
-    st.title("Document QA without LLM")
-    st.write("Upload your documents and ask questions!")
+    st.set_page_config(page_title="High-Accuracy Document QA", layout="wide")
+    st.title("High-Accuracy Document QA System")
     
-    # Initialize the document processor
-    doc_processor = get_document_processor()
+    # HuggingFace token input
+    hf_token = st.text_input("Enter your HuggingFace token:", type="password")
     
-    # Session state for storing processed data
-    if 'chunks' not in st.session_state:
-        st.session_state.chunks = None
-    if 'embeddings' not in st.session_state:
-        st.session_state.embeddings = None
+    if not hf_token:
+        st.warning("Please enter your HuggingFace token to proceed.")
+        st.info("You can get your token from: https://huggingface.co/settings/tokens")
+        return
+        
+    if not validate_token(hf_token):
+        st.error("Invalid HuggingFace token. Please check and try again.")
+        return
+    
+    # Initialize retriever in session state
+    if 'retriever' not in st.session_state:
+        st.session_state.retriever = EnhancedRetriever(hf_token)
     
     # File upload
-    uploaded_files = st.file_uploader("Upload your documents (PDF/DOCX)", 
-                                    type=["pdf", "docx"],
+    uploaded_files = st.file_uploader("Upload documents (PDF/DOCX)", 
+                                    type=["pdf", "docx"], 
                                     accept_multiple_files=True)
     
     if uploaded_files:
-        # Process documents
-        all_text = process_documents(uploaded_files, doc_processor)
-        
-        if all_text.strip():
-            # Split text into chunks
-            if st.session_state.chunks is None:
-                st.session_state.chunks = doc_processor.split_into_chunks(all_text)
+        with st.spinner("Processing documents..."):
+            text = extract_text_from_docs(uploaded_files)
             
-            if st.session_state.chunks:
-                # Get embeddings for all chunks
-                if st.session_state.embeddings is None:
-                    with st.spinner("Processing documents..."):
-                        st.session_state.embeddings = doc_processor.get_embeddings(st.session_state.chunks)
-                
-                if len(st.session_state.embeddings) > 0:
-                    st.success("Documents processed successfully!")
-                    
-                    # Query input
-                    query = st.text_input("Ask a question about your documents:")
-                    
-                    if query:
-                        with st.spinner("Searching for relevant information..."):
-                            similar_chunks = doc_processor.find_most_similar_chunks(
-                                query, 
-                                st.session_state.chunks, 
-                                st.session_state.embeddings
-                            )
-                        
-                        if similar_chunks:
-                            st.subheader("Most Relevant Information:")
-                            for chunk, similarity in similar_chunks:
-                                with st.container():
-                                    st.markdown("---")
-                                    st.markdown(f"**Relevance Score:** {similarity:.2f}")
-                                    st.write(chunk)
-                        else:
-                            st.warning("No relevant information found.")
-                else:
-                    st.error("Error processing document embeddings.")
+            if text.strip():
+                st.session_state.retriever.initialize_retriever(text)
+                st.success("Documents processed successfully!")
             else:
-                st.error("Error processing document text.")
-        else:
-            st.error("No text could be extracted from the uploaded documents.")
-
+                st.error("No text could be extracted from the documents.")
+                return
+    
+        # Query interface
+        query = st.text_input("Ask a question about your documents:")
+        
+        if query:
+            with st.spinner("Searching for relevant information..."):
+                results = st.session_state.retriever.hybrid_search(query, top_k=3)
+                
+            if results:
+                st.subheader("Most Relevant Information:")
+                for chunk, score in results:
+                    with st.container():
+                        st.markdown("---")
+                        st.markdown(f"**Confidence Score:** {score:.4f}")
+                        st.write(chunk)
+                        
+                # Provide similarity threshold warning
+                if all(score < 0.5 for _, score in results):
+                    st.warning("⚠️ The confidence scores are relatively low. The answers might not be fully relevant.")
+            else:
+                st.warning("No relevant information found in the documents.")
+    
     # Add clear button
     if st.button("Clear All"):
-        st.session_state.chunks = None
-        st.session_state.embeddings = None
+        st.session_state.clear()
         st.experimental_rerun()
 
 if __name__ == "__main__":
     main()
-
-# Requirements (save as requirements.txt):
-# streamlit
-# PyPDF2
-# python-docx
-# sentence-transformers
-# scikit-learn
-# torch
-# numpy
