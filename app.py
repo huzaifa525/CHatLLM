@@ -5,11 +5,18 @@ from transformers import AutoTokenizer, AutoModelForQuestionAnswering
 import faiss
 import spacy
 import io
-
+import os
 # ----------------------------
 # Setup
 # ----------------------------
 st.title("RAG-Style Document QA (No LLM)")
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    # Download the model if not available
+    os.system("python -m spacy download en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
+
 
 @st.cache_resource
 def load_embedding_model():
@@ -27,11 +34,6 @@ def load_qa_model():
 
 qa_tokenizer, qa_model = load_qa_model()
 
-@st.cache_resource
-def load_spacy_model():
-    return spacy.load("en_core_web_sm")
-
-nlp = load_spacy_model()
 
 
 # ----------------------------
