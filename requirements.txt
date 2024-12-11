@@ -1,8 +1,13 @@
+
+# requirements.txt
 streamlit
 PyPDF2
 python-docx
-nltk
 sentence-transformers
 scikit-learn
 torch
 numpy
+rank-bm25
+transformers
+huggingface-hub
+tqdm
