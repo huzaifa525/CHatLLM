@@ -15,12 +15,15 @@ logger = logging.getLogger(__name__)
 # Environment and Config
 # ----------------------------
 def get_hf_token() -> str:
-    """Securely get HuggingFace token from environment variable."""
-    token = os.getenv("HF_TOKEN")
-    if not token:
-        st.error("HuggingFace token not found in environment variables. Please set HF_TOKEN.")
+    """Securely get HuggingFace token from Streamlit secrets."""
+    try:
+        return st.secrets["hf_token"]
+    except Exception as e:
+        st.error("""
+        HuggingFace token not found in Streamlit secrets.
+        Please add your token to the secrets.toml file in your Streamlit Cloud deployment.
+        """)
         st.stop()
-    return token
 
 # ----------------------------
 # Model Loading
