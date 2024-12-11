@@ -27,12 +27,13 @@ class DocumentQA:
         self.bm25 = None
         
         # Add special tokens
-        special_tokens = {
+        special_tokens_dict = {
             'pad_token': '<|pad|>',
-            'sep_token': '<|sep|>',
-            'question_token': '<|question|>'
+            'additional_special_tokens': ['<|sep|>', '<|question|>']
         }
-        self.tokenizer.add_special_tokens(special_tokens)
+        self.tokenizer.add_special_tokens(special_tokens_dict)
+        self.sep_token = '<|sep|>'
+        self.question_token = '<|question|>'
         self.encoder.resize_token_embeddings(len(self.tokenizer))
         self.generator.resize_token_embeddings(len(self.tokenizer))
 
@@ -104,7 +105,7 @@ class DocumentQA:
     def generate_answer(self, question: str, context: str) -> str:
         """Generate answer using GPT-2"""
         # Prepare input text
-        input_text = f"{context}{self.tokenizer.question_token}{question}"
+        input_text = f"{context}{self.question_token}{question}"
         
         # Tokenize
         inputs = self.tokenizer(input_text, return_tensors='pt',
