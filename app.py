@@ -3,6 +3,7 @@ import torch
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForQuestionAnswering
 import faiss
+import spacy
 import io
 
 # ----------------------------
@@ -10,36 +11,69 @@ import io
 # ----------------------------
 st.title("RAG-Style Document QA (No LLM)")
 
-# Load embedding model
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 
 embedding_model = load_embedding_model()
 
-# Load QA model
 @st.cache_resource
 def load_qa_model():
-    qa_model_name = "distilbert-base-uncased-distilled-squad"
+    # A more capable QA model
+    qa_model_name = "deepset/bert-large-uncased-whole-word-masking-squad2"
     tokenizer = AutoTokenizer.from_pretrained(qa_model_name)
     model = AutoModelForQuestionAnswering.from_pretrained(qa_model_name)
     return tokenizer, model
 
 qa_tokenizer, qa_model = load_qa_model()
 
+@st.cache_resource
+def load_spacy_model():
+    return spacy.load("en_core_web_sm")
+
+nlp = load_spacy_model()
+
+
 # ----------------------------
-# Document and Index Management
+# Document Processing
 # ----------------------------
-@st.cache_data
+def chunk_text(text, chunk_size=200):
+    # Split text into words and chunk
+    words = text.split()
+    for i in range(0, len(words), chunk_size):
+        yield " ".join(words[i:i+chunk_size])
+
+def process_documents(uploaded_files, chunk_size):
+    docs = []
+    for uploaded_file in uploaded_files:
+        file_content = uploaded_file.read().decode("utf-8", errors='ignore')
+        # Use spaCy to break the document into sentences, then chunk sentences
+        doc_spacy = nlp(file_content)
+        # Extract text from sentences
+        full_text = "\n".join([sent.text.strip() for sent in doc_spacy.sents if sent.text.strip()])
+        
+        # Chunk the full text
+        for ch in chunk_text(full_text, chunk_size=chunk_size):
+            docs.append(ch.strip())
+    return [d for d in docs if d.strip()]
+
+
+@st.cache_data(show_spinner=True)
 def build_index_from_docs(docs):
-    # Encode all docs
-    doc_embeddings = embedding_model.encode(docs, show_progress_bar=True)
-    doc_embeddings = doc_embeddings.astype('float32')
-    
-    # Create FAISS index
+    doc_embeddings = embedding_model.encode(docs, show_progress_bar=False).astype('float32')
     index = faiss.IndexFlatIP(doc_embeddings.shape[1])
     index.add(doc_embeddings)
     return docs, index
+
+
+def preprocess_query(query):
+    # Use spaCy to normalize query (lemmatization, lowercasing)
+    doc = nlp(query)
+    processed_tokens = [token.lemma_.lower() for token in doc if not token.is_punct and not token.is_space]
+    # Join back into a processed query
+    processed_query = " ".join(processed_tokens)
+    return processed_query
+
 
 def retrieve_docs(query, docs, index, top_k=3):
     query_embedding = embedding_model.encode([query]).astype('float32')
@@ -47,51 +81,59 @@ def retrieve_docs(query, docs, index, top_k=3):
     retrieved = [(docs[i], scores[0][j]) for j, i in enumerate(indices[0])]
     return retrieved
 
+
 def answer_question(question, context):
     inputs = qa_tokenizer.encode_plus(question, context, return_tensors='pt')
     with torch.no_grad():
         outputs = qa_model(**inputs)
     start_scores = outputs.start_logits
     end_scores = outputs.end_logits
+
+    start_idx = torch.argmax(start_scores)
+    end_idx = torch.argmax(end_scores) + 1
+
+    all_tokens = qa_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
+    answer_tokens = all_tokens[start_idx:end_idx]
+    answer = qa_tokenizer.convert_tokens_to_string(answer_tokens).strip()
     
-    answer_start = torch.argmax(start_scores)
-    answer_end = torch.argmax(end_scores) + 1
-    answer = qa_tokenizer.convert_tokens_to_string(
-        qa_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0][answer_start:answer_end])
-    )
-    return answer.strip()
+    # If the model returns '[CLS]' or empty, it might mean no answer found
+    if answer in ["[CLS]", ""]:
+        answer = "No clear answer found."
+    return answer
+
 
 # ----------------------------
-# Streamlit App Logic
+# Streamlit Interface
 # ----------------------------
 
-st.write("Upload your text documents (as .txt files) and then ask questions!")
-
+st.write("Upload your text documents and then ask questions!")
 uploaded_files = st.file_uploader("Upload text files", type=["txt"], accept_multiple_files=True)
 
+chunk_size = st.slider("Chunk size (number of words per chunk)", min_value=50, max_value=500, value=200, step=50)
+
 if uploaded_files:
-    # Parse uploaded files into docs list
-    docs = []
-    for uploaded_file in uploaded_files:
-        # Read the content of the file
-        file_content = uploaded_file.read().decode("utf-8", errors='ignore')
-        # Split by paragraphs (or lines)
-        paragraphs = [p.strip() for p in file_content.split('\n') if p.strip()]
-        docs.extend(paragraphs)
+    docs = process_documents(uploaded_files, chunk_size)
+    if docs:
+        docs, index = build_index_from_docs(docs)
 
-    # Build or rebuild the index
-    docs, index = build_index_from_docs(docs)
-    
-    user_query = st.text_input("Ask a question about the uploaded documents:")
-    if user_query and docs:
-        with st.spinner("Searching and answering..."):
-            retrieved = retrieve_docs(user_query, docs, index, top_k=3)
-            best_context, score = retrieved[0]
-            final_answer = answer_question(user_query, best_context)
+        user_query = st.text_input("Ask a question about the uploaded documents:")
+        if user_query and docs:
+            with st.spinner("Processing your query..."):
+                # Preprocess the query with NLP
+                processed_query = preprocess_query(user_query)
+                retrieved = retrieve_docs(processed_query, docs, index, top_k=3)
+                
+                # Use the top retrieved passage for QA
+                best_context, score = retrieved[0]
+                final_answer = answer_question(user_query, best_context)
 
-        st.subheader("Answer:")
-        st.write(final_answer)
+            st.subheader("Answer:")
+            st.write(final_answer)
 
-        st.subheader("Top Retrieved Passages:")
-        for i, (passage, sc) in enumerate(retrieved):
-            st.write(f"**Passage {i+1} (score: {sc:.4f})**:\n{passage}")
+            st.subheader("Top Retrieved Passages:")
+            for i, (passage, sc) in enumerate(retrieved):
+                st.write(f"**Passage {i+1} (score: {sc:.4f})**:\n{passage}")
+    else:
+        st.write("No documents processed. Make sure your files contain readable text.")
+else:
+    st.write("Please upload one or more text files to begin.")
