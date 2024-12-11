@@ -1,141 +1,121 @@
 import streamlit as st
+from transformers import VisionEncoderDecoderModel, DonutProcessor
 import torch
-from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForQuestionAnswering
-import faiss
-import spacy
+from PIL import Image
 import io
-import os
+
 # ----------------------------
 # Setup
 # ----------------------------
-st.title("RAG-Style Document QA (No LLM)")
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    # Download the model if not available
-    os.system("python -m spacy download en_core_web_sm")
-    nlp = spacy.load("en_core_web_sm")
-
+st.title("DocVQA with Donut Model")
 
 @st.cache_resource
-def load_embedding_model():
-    return SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+def load_docvqa_model():
+    # Load Donut model and processor
+    model_name = "naver-clova-ix/donut-base-finetuned-docvqa"
+    processor = DonutProcessor.from_pretrained(model_name)
+    model = VisionEncoderDecoderModel.from_pretrained(model_name)
+    return processor, model
 
-embedding_model = load_embedding_model()
-
-@st.cache_resource
-def load_qa_model():
-    # A more capable QA model
-    qa_model_name = "naver-clova-ix/donut-base-finetuned-docvqa"
-    tokenizer = AutoTokenizer.from_pretrained(qa_model_name)
-    model = AutoModelForQuestionAnswering.from_pretrained(qa_model_name)
-    return tokenizer, model
-
-qa_tokenizer, qa_model = load_qa_model()
-
-
+processor, model = load_docvqa_model()
 
 # ----------------------------
-# Document Processing
+# Utility Functions
 # ----------------------------
 def chunk_text(text, chunk_size=200):
-    # Split text into words and chunk
     words = text.split()
     for i in range(0, len(words), chunk_size):
         yield " ".join(words[i:i+chunk_size])
 
-def process_documents(uploaded_files, chunk_size):
-    docs = []
-    for uploaded_file in uploaded_files:
-        file_content = uploaded_file.read().decode("utf-8", errors='ignore')
-        # Use spaCy to break the document into sentences, then chunk sentences
-        doc_spacy = nlp(file_content)
-        # Extract text from sentences
-        full_text = "\n".join([sent.text.strip() for sent in doc_spacy.sents if sent.text.strip()])
-        
-        # Chunk the full text
-        for ch in chunk_text(full_text, chunk_size=chunk_size):
-            docs.append(ch.strip())
-    return [d for d in docs if d.strip()]
-
-
-@st.cache_data(show_spinner=True)
-def build_index_from_docs(docs):
-    doc_embeddings = embedding_model.encode(docs, show_progress_bar=False).astype('float32')
-    index = faiss.IndexFlatIP(doc_embeddings.shape[1])
-    index.add(doc_embeddings)
-    return docs, index
-
-
-def preprocess_query(query):
-    # Use spaCy to normalize query (lemmatization, lowercasing)
-    doc = nlp(query)
-    processed_tokens = [token.lemma_.lower() for token in doc if not token.is_punct and not token.is_space]
-    # Join back into a processed query
-    processed_query = " ".join(processed_tokens)
-    return processed_query
-
-
-def retrieve_docs(query, docs, index, top_k=3):
-    query_embedding = embedding_model.encode([query]).astype('float32')
-    scores, indices = index.search(query_embedding, top_k)
-    retrieved = [(docs[i], scores[0][j]) for j, i in enumerate(indices[0])]
-    return retrieved
-
-
-def answer_question(question, context):
-    inputs = qa_tokenizer.encode_plus(question, context, return_tensors='pt')
-    with torch.no_grad():
-        outputs = qa_model(**inputs)
-    start_scores = outputs.start_logits
-    end_scores = outputs.end_logits
-
-    start_idx = torch.argmax(start_scores)
-    end_idx = torch.argmax(end_scores) + 1
-
-    all_tokens = qa_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-    answer_tokens = all_tokens[start_idx:end_idx]
-    answer = qa_tokenizer.convert_tokens_to_string(answer_tokens).strip()
+def run_docvqa_on_image(question, image: Image.Image):
+    # Prepare question prompt as per Donut docvqa format
+    question_prompt = f"<s_docvqa><s_question>{question}</s_question><s_answer>"
     
-    # If the model returns '[CLS]' or empty, it might mean no answer found
-    if answer in ["[CLS]", ""]:
-        answer = "No clear answer found."
-    return answer
+    pixel_values = processor(image, return_tensors="pt").pixel_values
+    decoder_input_ids = processor.tokenizer(question_prompt, add_special_tokens=False, return_tensors="pt").input_ids
 
+    outputs = model.generate(
+        pixel_values, 
+        decoder_input_ids=decoder_input_ids,
+        max_length=512,
+        eos_token_id=processor.tokenizer.eos_token_id,
+        pad_token_id=processor.tokenizer.pad_token_id
+    )
+    answer = processor.tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+    answer = answer.replace("</s>", "").strip()
+    return answer if answer else "No clear answer found."
+
+def text_to_image(text):
+    # Convert text chunk to an image for demonstration
+    # (This is a hack. The donut model is for images, not raw text.)
+    # For demonstration, we will render text on an image background.
+    # Results may not be meaningful since the model is trained on document images.
+    
+    from PIL import ImageDraw, ImageFont
+    # Create a white image
+    img = Image.new('RGB', (800, 1000), color='white')
+    draw = ImageDraw.Draw(img)
+    # If you have a font file, you can specify it, else will use default.
+    # Attempt to wrap text
+    font = ImageFont.load_default()
+    margin = 10
+    offset = 10
+    for line in text.split('\n'):
+        draw.text((margin, offset), line, font=font, fill='black')
+        offset += 20
+    return img
 
 # ----------------------------
-# Streamlit Interface
+# Streamlit App
 # ----------------------------
 
-st.write("Upload your text documents and then ask questions!")
-uploaded_files = st.file_uploader("Upload text files", type=["txt"], accept_multiple_files=True)
+st.write("Upload image or text documents and then ask a question. For best results, upload scanned document images.")
 
-chunk_size = st.slider("Chunk size (number of words per chunk)", min_value=50, max_value=500, value=200, step=50)
+uploaded_files = st.file_uploader("Upload documents (images like .png/.jpg or text files)", 
+                                  type=["txt","png","jpg","jpeg"],
+                                  accept_multiple_files=True)
 
+chunk_size = st.slider("Chunk size (for text documents)", min_value=50, max_value=500, value=200, step=50)
+
+docs = []
 if uploaded_files:
-    docs = process_documents(uploaded_files, chunk_size)
-    if docs:
-        docs, index = build_index_from_docs(docs)
+    for uploaded_file in uploaded_files:
+        file_type = uploaded_file.type
+        if "text" in file_type:
+            # Text file, chunk it and convert chunks to images
+            content = uploaded_file.read().decode("utf-8", errors='ignore')
+            for ch in chunk_text(content, chunk_size):
+                if ch.strip():
+                    docs.append(('text', ch))
+        elif "image" in file_type:
+            # Direct image
+            image = Image.open(uploaded_file).convert("RGB")
+            docs.append(('image', image))
 
-        user_query = st.text_input("Ask a question about the uploaded documents:")
-        if user_query and docs:
-            with st.spinner("Processing your query..."):
-                # Preprocess the query with NLP
-                processed_query = preprocess_query(user_query)
-                retrieved = retrieve_docs(processed_query, docs, index, top_k=3)
-                
-                # Use the top retrieved passage for QA
-                best_context, score = retrieved[0]
-                final_answer = answer_question(user_query, best_context)
+if docs:
+    user_query = st.text_input("Ask a question about the uploaded documents:")
+    if user_query:
+        # For simplicity, just use the first doc. 
+        # If multiple docs are present, you could let the user pick which doc to query.
+        doc_type, doc_data = docs[0]
+        
+        if doc_type == 'text':
+            # Convert text chunk to image
+            doc_image = text_to_image(doc_data)
+            final_answer = run_docvqa_on_image(user_query, doc_image)
+        else:
+            # It's already an image
+            final_answer = run_docvqa_on_image(user_query, doc_data)
 
-            st.subheader("Answer:")
-            st.write(final_answer)
+        st.subheader("Answer:")
+        st.write(final_answer)
 
-            st.subheader("Top Retrieved Passages:")
-            for i, (passage, sc) in enumerate(retrieved):
-                st.write(f"**Passage {i+1} (score: {sc:.4f})**:\n{passage}")
-    else:
-        st.write("No documents processed. Make sure your files contain readable text.")
+        # Optionally show the doc image
+        if doc_type == 'text':
+            st.subheader("Document Preview (Rendered from text):")
+            st.image(text_to_image(doc_data))
+        else:
+            st.subheader("Document Preview:")
+            st.image(doc_data)
 else:
-    st.write("Please upload one or more text files to begin.")
+    st.write("No documents processed. Please upload an image or text file.")
