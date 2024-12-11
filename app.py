@@ -26,10 +26,25 @@ class EnhancedRetriever:
         self.embeddings = None
         
     def preprocess_text(self, text: str) -> str:
-        """Clean and normalize text"""
-        text = re.sub(r'\s+', ' ', text)  # Remove multiple spaces
-        text = re.sub(r'[^\w\s.]', '', text)  # Remove special characters except periods
+        """Clean and normalize text while preserving important invoice/receipt numbers"""
+        # Preserve receipt/invoice numbers with specific patterns
+        text = re.sub(r'(\b\w+[-/]\w+\b|\b\d+[A-Z]\d+[A-Z]\d+\b|\b\d{6,}\b)', r' \1 ', text)
+        text = re.sub(r'\s+', ' ', text)  # Normalize spaces
         return text.strip()
+        
+    def extract_invoice_number(self, text: str) -> List[str]:
+        """Extract potential invoice/receipt numbers"""
+        patterns = [
+            r'\b\d{6,}\b',  # 6 or more digits
+            r'\b[A-Z0-9]{8,}\b',  # Alphanumeric 8 or more chars
+            r'\b\w+[-/]\w+\b',  # Pattern with dash or slash
+            r'\b\d+[A-Z]\d+[A-Z]\d+\b'  # Mixed digit-letter pattern
+        ]
+        numbers = []
+        for pattern in patterns:
+            matches = re.finditer(pattern, text)
+            for match in matches:
+                numbers.append(match.group())
     
     def create_sliding_windows(self, text: str, window_size: int = 100, stride: int = 50) -> List[str]:
         """Create overlapping windows of text for better context preservation"""
@@ -83,21 +98,34 @@ class EnhancedRetriever:
                                           batch_size=8,
                                           normalize_embeddings=True)  # Normalized for better similarity
     
-    def hybrid_search(self, query: str, top_k: int = 3) -> List[Tuple[str, float]]:
+    def hybrid_search(self, query: str, top_k: int = 3) -> List[Tuple[str, float, List[str]]]:
         """Combine BM25 and dense retrieval for more accurate results"""
         if not self.chunks:
             return []
             
         # Get BM25 scores
         bm25_scores = self.bm25.get_scores(query.split())
-        bm25_scores = (bm25_scores - np.min(bm25_scores)) / (np.max(bm25_scores) - np.min(bm25_scores))
+        if len(bm25_scores) > 0:
+            bm25_scores = (bm25_scores - np.min(bm25_scores)) / (np.max(bm25_scores) - np.min(bm25_scores))
         
         # Get dense embedding scores
         query_embedding = self.model.encode([query], normalize_embeddings=True)[0]
         dense_scores = cosine_similarity([query_embedding], self.embeddings)[0]
         
-        # Combine scores (weighted average)
-        combined_scores = 0.3 * bm25_scores + 0.7 * dense_scores
+        # Adjust weights based on query type
+        if any(keyword in query.lower() for keyword in ['invoice', 'receipt', 'number', 'id']):
+            combined_scores = 0.6 * bm25_scores + 0.4 * dense_scores
+        else:
+            combined_scores = 0.3 * bm25_scores + 0.7 * dense_scores
+            
+        # Extract invoice numbers from relevant chunks
+        results = []
+        top_indices = combined_scores.argsort()[-top_k:][::-1]
+        
+        for idx in top_indices:
+            chunk = self.chunks[idx]
+            invoice_numbers = self.extract_invoice_number(chunk)
+            results.append((chunk, combined_scores[idx], invoice_numbers))
         
         # Get top results
         top_indices = combined_scores.argsort()[-top_k:][::-1]
@@ -175,12 +203,17 @@ def main():
                 results = st.session_state.retriever.hybrid_search(query, top_k=3)
                 
             if results:
-                st.subheader("Most Relevant Information:")
-                for chunk, score in results:
-                    with st.container():
-                        st.markdown("---")
-                        st.markdown(f"**Confidence Score:** {score:.4f}")
-                        st.write(chunk)
+                st.subheader("Invoice/Receipt Numbers Found:")
+                for chunk, score, invoice_numbers in results:
+                    if invoice_numbers:
+                        with st.container():
+                            st.markdown("---")
+                            st.markdown(f"**Confidence Score:** {score:.4f}")
+                            st.markdown("**Found Numbers:**")
+                            for num in invoice_numbers:
+                                st.markdown(f"- {num}")
+                            st.markdown("**Context:**")
+                            st.write(chunk)
                         
                 # Provide similarity threshold warning
                 if all(score < 0.5 for _, score in results):
