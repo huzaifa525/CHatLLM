@@ -5,6 +5,6 @@ pandas
 plotly 
 matplotlib 
 numpy 
-python-docx2txt 
+docx2txt 
 PyPDF2 
 requests
