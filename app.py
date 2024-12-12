@@ -13,14 +13,16 @@ import tempfile
 pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
 
 # Define Ollama API endpoint and model
-OLLAMA_URL = "http://147.182.201.56:11434"
+OLLAMA_URL = "http://147.182.201.56:11434/api"
 MODEL_NAME = "smollm2:360m"
 
 def query_ollama(message):
     """Send a query to the Ollama model."""
     payload = {
         "model": MODEL_NAME,
-        "prompt": message
+        "messages": [
+            {"role": "user", "content": message}
+        ]
     }
     response = requests.post(f"{OLLAMA_URL}/chat", json=payload)
     if response.status_code == 200:
