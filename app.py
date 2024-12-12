@@ -25,10 +25,16 @@ def query_ollama(message):
         ]
     }
     response = requests.post(f"{OLLAMA_URL}/chat", json=payload)
-    if response.status_code == 200:
-        return response.json().get("response", "No response")
-    else:
-        return f"Error: {response.status_code} - {response.text}"
+    try:
+        response.raise_for_status()  # Raise HTTPError for bad responses
+        result = response.json()  # Parse JSON
+        if isinstance(result, dict):
+            return result.get("response", "No response")
+        return "Unexpected response format."
+    except requests.exceptions.RequestException as e:
+        return f"Error: {str(e)}"
+    except ValueError:
+        return "Error: Unable to decode JSON from the API response."
 
 def extract_text_from_file(uploaded_file):
     """Extract text from uploaded files."""
