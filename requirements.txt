@@ -10,3 +10,4 @@ PyPDF2
 requests
 pdf2image
 textract
+sentence_transformers
