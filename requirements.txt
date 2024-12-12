@@ -1,13 +1,10 @@
-
-# requirements.txt
-streamlit
-PyPDF2
-python-docx
-sentence-transformers
-scikit-learn
-torch
-numpy
-rank-bm25
-transformers
-huggingface-hub
-tqdm
+streamlit 
+pytesseract 
+Pillow 
+pandas 
+plotly 
+matplotlib 
+numpy 
+python-docx2txt 
+PyPDF2 
+requests
