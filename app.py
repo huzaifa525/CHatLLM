@@ -8,6 +8,8 @@ import textract
 import re
 import os
 import tempfile
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
 # Set Tesseract executable path (update to match your installation)
 pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
@@ -15,6 +17,9 @@ pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
 # Define Ollama API endpoint and model
 OLLAMA_URL = "http://147.182.201.56:11434/api"
 MODEL_NAME = "smollm2:360m"
+
+# Initialize SentenceTransformer for vector space
+vector_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def query_ollama(message):
     """Send a query to the Ollama model."""
@@ -27,14 +32,19 @@ def query_ollama(message):
     response = requests.post(f"{OLLAMA_URL}/chat", json=payload)
     try:
         response.raise_for_status()  # Raise HTTPError for bad responses
-        result = response.json()  # Parse JSON
-        if isinstance(result, dict):
-            return result.get("response", "No response")
-        return "Unexpected response format."
+        content = response.text  # Use raw text to handle non-standard formats
+        # Extract JSON portion if present
+        result = re.search(r'\{.*\}', content, re.DOTALL)  # Matches the JSON object
+        if result:
+            parsed_result = result.group()
+            response_data = requests.json.loads(parsed_result)
+            return response_data.get("response", "No response")
+        else:
+            return "Unexpected response format or no JSON content found."
     except requests.exceptions.RequestException as e:
         return f"Error: {str(e)}"
     except ValueError:
-        return "Error: Unable to decode JSON from the API response."
+        return f"Error: Unable to parse JSON from API response: {response.text}"
 
 def extract_text_from_file(uploaded_file):
     """Extract text from uploaded files."""
@@ -61,10 +71,15 @@ def visualize_text_with_latex(text):
     text = re.sub(r'\$([^$]+)\$', r'$$\1$$', text)  # Handle inline LaTeX
     return text
 
+def get_vector_representation(text):
+    """Get vector representation of the text."""
+    embeddings = vector_model.encode([text])
+    return embeddings[0]
+
 # Streamlit UI
 def main():
     st.set_page_config(page_title="Ollama Chatbot", layout="wide")
-    st.title("Chatbot with Document Upload")
+    st.title("Chatbot with Document Upload and Vector Space")
 
     # File upload
     st.sidebar.header("Upload Document")
@@ -84,6 +99,11 @@ def main():
         # Show extracted text in the sidebar
         with st.sidebar.expander("Extracted Text"):
             st.text_area("Text from Document", document_text, height=200)
+
+        # Vector representation
+        with st.sidebar.expander("Vector Representation"):
+            vector_representation = get_vector_representation(document_text)
+            st.write("Vector Space:", vector_representation)
 
     # Chat functionality
     with chat_placeholder:
