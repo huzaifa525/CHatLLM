@@ -6,6 +6,8 @@ from pdf2image import convert_from_path
 from io import BytesIO
 import textract
 import re
+import os
+import tempfile
 
 # Set Tesseract executable path (update to match your installation)
 pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
@@ -35,7 +37,13 @@ def extract_text_from_file(uploaded_file):
         image = Image.open(uploaded_file)
         text = pytesseract.image_to_string(image)
     elif uploaded_file.type in ("text/plain", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"):
-        text = textract.process(uploaded_file).decode("utf-8")
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            temp_file.write(uploaded_file.read())
+            temp_file_path = temp_file.name
+        try:
+            text = textract.process(temp_file_path).decode("utf-8")
+        finally:
+            os.remove(temp_file_path)  # Ensure the temporary file is deleted
     else:
         text = "Unsupported file type."
     return text
